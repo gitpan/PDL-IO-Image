@@ -13,7 +13,7 @@ use DynaLoader;
 
 
 
-   $PDL::IO::Image::VERSION = 0.002;
+   $PDL::IO::Image::VERSION = 0.003;
    @ISA    = ( 'PDL::Exporter','DynaLoader' );
    push @PDL::Core::PP, __PACKAGE__;
    bootstrap PDL::IO::Image $VERSION;
@@ -51,6 +51,9 @@ sub rimage {
   if (my $flip = $options->{flip}) {
     $pimage->flip_horizontal if $flip =~ /H/;
     $pimage->flip_vertical   if $flip =~ /V/;
+  }
+  if (defined $options->{rotate}) {
+    $pimage->rotate(_val2list($options->{rotate}));
   }
   if (defined $options->{convert_image_type}) {
     $pimage->convert_image_type(_val2list($options->{convert_image_type}));
@@ -230,7 +233,7 @@ Functional interface:
  say $pdl1->info;       # PDL: Byte D [400,300] ... width 400, height 300
  # do some hacking with $piddle
  wimage($pdl1, 'output.tiff');
- # you can use wimage as PDL's method
+ # you can also use wimage as PDL's method
  $pdl1->wimage('another-output.png');
 
  my ($pixels, $palette) = rimage('picture-256colors.gif', { palette=>1 });
@@ -283,9 +286,9 @@ Object oriented (OO) interface:
  # export palette from PDL::IO::Image object content into a piddle
  my $pal_pdl = $pimage1->palette_to_pdl();
 
- # create PDL::IO::Image object from PDL data
+ # let us have a piddle with pixel data
  my $wave_pixels = (sin(0.008 * xvals(2001, 2001)) * 128 + 127)->byte;
- # here you can do some other tricks with $wave_pixels
+ # create PDL::IO::Image object from PDL piddle
  my $pimage2 = PDL::IO::Image->new_from_pdl($wave_pixels);
  # do some transformation with PDL::IO::Image object
  $pimage2->rotate(45);
@@ -305,7 +308,7 @@ Check also an excellent FreeImage documentation at L<http://freeimage.sourceforg
 =head2 Supported file formats
 
 This module supports loading (L</new_from_file> or L</rimage>) and saving (L</save> or L</wimage>)
-of the following formats (note that not all formats supports writing - see C<R/W> column).
+of the following formats (note that not all formats support writing - see C<R/W> column).
 
      BMP  R/W  Windows or OS/2 Bitmap [extensions: bmp]
      ICO  R/W  Windows Icon [extensions: ico]
@@ -386,21 +389,21 @@ Image type is important especially when you want to load image data from PDL pid
 (and later save to a file). Based on piddle size and piddle type the image type is detected (in L</new_from_pdl>
 and L</wimage>).
 
-  <w>...image width
-  <h>...image height
-  PDL Byte     [<w>,<h>]     BITMAP 1-/4-/8-bits per pixel
-  PDL Byte     [<w>,<h>,3]   BITMAP 24-bits per pixel (RGB)
-  PDL Byte     [<w>,<h>,4]   BITMAP 32-bits per pixel (RGBA)
-  PDL Ushort   [<w>,<h>]     UINT16
-  PDL Short    [<w>,<h>]     INT16
-  PDL LongLong [<w>,<h>]     UINT32 (unfortunately there is no PDL Ulong type)
-  PDL Long     [<w>,<h>]     INT32
-  PDL Float    [<w>,<h>]     FLOAT
-  PDL Double   [<w>,<h>]     DOUBLE
-  PDL Ushort   [<w>,<h>,3]   RGB16
-  PDL Ushort   [<w>,<h>,4]   RGBA16
-  PDL Float    [<w>,<h>,3]   RGBf
-  PDL Float    [<w>,<h>,4]   RGBAF
+  W .. image width
+  H .. image height
+  PDL Byte     [W,H]       BITMAP 1-/4-/8-bits per pixel
+  PDL Byte     [W,H,3]     BITMAP 24-bits per pixel (RGB)
+  PDL Byte     [W,H,4]     BITMAP 32-bits per pixel (RGBA)
+  PDL Ushort   [W,H]       UINT16
+  PDL Short    [W,H]       INT16
+  PDL LongLong [W,H]       UINT32 (unfortunately there is no PDL Ulong type)
+  PDL Long     [W,H]       INT32
+  PDL Float    [W,H]       FLOAT
+  PDL Double   [W,H]       DOUBLE
+  PDL Ushort   [W,H,3]     RGB16
+  PDL Ushort   [W,H,4]     RGBA16
+  PDL Float    [W,H,3]     RGBf
+  PDL Float    [W,H,4]     RGBAF
 
 B<IMPORTANT> the strings with type name (e.g. C<'BITMAP'>, C<'UINT16'>, C<'RGBAF'>) are used as a image type
 identifier in method L</convert_image_type> and a return value of method L</get_image_type>.
@@ -440,35 +443,40 @@ Items supported in B<options> hash:
 
 =over
 
-=item format
+=item * format
 
 String identifying file format (e.g. C<'JPEG'> - for valid values see L</"Supported file formats">), default
 is C<'AUTO'> which means that format is auto detected.
 
-=item format_flag
+=item * format_flag
 
 Optional flag related to loading given file format - see L</new_from_file> method for more info.
 
-=item page
+=item * page
 
-Load specific page from multi-page images (0-based index).
+Index (0-based) of a specific page to load from multi-page images (TIFF, ICO or animated GIF).
 
-=item flip
+=item * flip
 
 Values C<'H'>, C<'V'> or C<'HV'> specifying horizontal, vertical or horizontal+vertical flipping.
 Default: do not flip.
 
-=item convert_image_type
+=item * rotate
+
+Optional floating point value with rotation angle (in degrees) - see L</rotate> method for more info.
+Default: do not rotate.
+
+=item * convert_image_type
 
 String identifying image type (e.g. C<'BITMAP'> - for valid values see L</"Supported image types">).
 Default: no conversion.
 
-=item region
+=item * region
 
 An arrayref with a region specification like C<[$x1,$x2,$y1,$y2]> - see L</pixels_to_pdl> method for more info.
 Default: create the output piddle from the whole image.
 
-=item palette
+=item * palette
 
 Values C<0> (default) or C<1> - whether to load (or not) color lookup table (aka LUT).
 
@@ -504,40 +512,40 @@ Items supported in B<options> hash:
 
 =over
 
-=item format
+=item * format
 
 String identifying file format (e.g. C<'JPEG'> - for valid values see L</"Supported file formats">), default
 is C<'AUTO'> which means that format is auto detected from extension of C<$filename>.
 
-=item format_flag
+=item * format_flag
 
 Optional flag related to saving given file format - see L</save> method for more info.
 
-=item palette
+=item * palette
 
 Optional PDL piddle with color palette (has to be C<PDL Byte[3,N]> where 0 < N <= 256) containing RGB triplets.
 
-=item flip
+=item * flip
 
 Values C<'H'>, C<'V'> or C<'HV'> specifying horizontal, vertical or horizontal+vertical flipping.
 Default: do not flip.
 
-=item rotate
+=item * rotate
 
 Optional floating point value with rotation angle (in degrees) - see L</rotate> method for more info.
 Default: do not rotate.
 
-=item rescale
+=item * rescale
 
 Optional arrayref with rescale specification (in pixels) e.g. C<[$new_w, $new_h]> - see L</rescale> method for more info.
 Default: do not rescale.
 
-=item rescale_pct
+=item * rescale_pct
 
 Optional floating point value with rescale ratio in percent - see L</rescale_pct> method for more info.
 Default: do not rescale.
 
-=item convert_image_type
+=item * convert_image_type
 
 String identifying image type (e.g. C<'BITMAP'> - for valid values see L</"Supported image types">).
 Default: no conversion.
@@ -634,6 +642,8 @@ Export PDL::IO::Image object into a image file.
  #or
  $pimage->save($filename);
 
+Returns C<$pimage> (self).
+
 C<$filename> - output image file name.
 
 C<$format> - string identifying file format (e.g. C<'JPEG'> - for valid values see L</"Supported file formats">),
@@ -729,6 +739,8 @@ Set the horizontal resolution, in pixels-per-meter.
 
  $pimage->set_dots_per_meter_x($res);
 
+Returns C<$pimage> (self).
+
 =head2 get_dots_per_meter_y
 
 Returns the vertical resolution, in pixels-per-meter.
@@ -740,6 +752,8 @@ Returns the vertical resolution, in pixels-per-meter.
 Set the vertical resolution, in pixels-per-meter.
 
  $pimage->set_dots_per_meter_y($res);
+
+Returns C<$pimage> (self).
 
 =head2 get_color_type
 
@@ -780,11 +794,15 @@ Does nothing on high color images.
 
  $pimage->set_transparent_index($index);
 
+Returns C<$pimage> (self).
+
 =head2 flip_horizontal
 
 Flip the image horizontally along the vertical axis.
 
  $pimage->flip_horizontal;
+
+Returns C<$pimage> (self).
 
 =head2 flip_vertical
 
@@ -792,11 +810,15 @@ Flip the image vertically along the horizontal axis.
 
  $pimage->flip_vertical;
 
+Returns C<$pimage> (self).
+
 =head2 rotate
 
 Rotates image, the angle of counter clockwise rotation is specified by the C<$angle> parameter in degrees.
 
  $pimage->rotate($angle);
+
+Returns C<$pimage> (self).
 
 =head2 rescale
 
@@ -807,6 +829,8 @@ Performs resampling (scaling/zooming) of a greyscale or RGB(A) image to the desi
  $pimage->rescale($dst_width, 0);  # destination height is computed
  #or
  $pimage->rescale(0, $dst_height); # destination width is computed
+
+Returns C<$pimage> (self).
 
 C<$filter> - resampling filter identifier:
 
@@ -819,11 +843,13 @@ C<$filter> - resampling filter identifier:
 
 =head2 rescale_pct
 
-Performs resampling by giver percentage ratio.
+Performs resampling by given percentage ratio.
 
  $pimage->rescale($dst_width_pct, $dst_height_pct, $filter);
  #or
  $pimage->rescale($dst_pct);
+
+Returns C<$pimage> (self).
 
 C<$filter> - see L</rescale>
 
@@ -835,6 +861,8 @@ Converts an image to destination C<$image_type>.
  #or
  $pimage->convert_image_type($image_type);
 
+Returns C<$pimage> (self).
+
 C<$image_type> - string identifying image type (e.g. C<'BITMAP'>, C<'UINT16'> - for valid values see L</"Supported image types">).
 
 =head2 adjust_colors
@@ -842,6 +870,8 @@ C<$image_type> - string identifying image type (e.g. C<'BITMAP'>, C<'UINT16'> - 
 Adjusts an image's brightness, contrast and gamma as well as it may optionally invert the image within a single operation.
 
  $pimage->adjust_colors($brightness, $contrast, $gamma, $invert);
+
+Returns C<$pimage> (self).
 
 C<$brightness> - real value from range C<[-100..100]>, value C<0> means no change, less than 0 will make the
 image darker and greater than 0 will make the image brighter
@@ -854,11 +884,56 @@ darkens it, and greater than one lightens it
 
 C<$invert> - C<0> or C<1> invert (or not) all pixels
 
+=head2 color_dither
+
+Converts a bitmap to 1-bit monochrome bitmap using a dithering algorithm.
+
+ $pimage->color_dither($algorithm);
+ #or
+ $pimage->color_dither();
+
+Returns C<$pimage> (self).
+
+Possible C<$algorithm> values:
+
+ 0 .. Floyd & Steinberg error diffusion (DEFAULT)
+ 1 .. Bayer ordered dispersed dot dithering (order 2 dithering matrix)
+ 2 .. Bayer ordered dispersed dot dithering (order 3 dithering matrix)
+ 3 .. Ordered clustered dot dithering (order 3 - 6x6 matrix)
+ 4 .. Ordered clustered dot dithering (order 4 - 8x8 matrix)
+ 5 .. Ordered clustered dot dithering (order 8 - 16x16 matrix)
+ 6 .. Bayer ordered dispersed dot dithering (order 4 dithering matrix)
+
+=head2 color_threshhold
+
+Converts a bitmap to 1-bit monochrome bitmap using a C<$threshold> between [0..255] (default is 127).
+
+ $pimage->color_threshhold($threshold);
+ #or
+ $pimage->color_threshhold();
+
+Returns C<$pimage> (self).
+
+=head2 color_quantize
+
+ $pimage->color_quantize($quantize);
+ #or
+ $pimage->color_quantize();
+
+Returns C<$pimage> (self).
+
+Possible C<$quantize> values:
+
+ 0 .. Xiaolin Wu color quantization algorithm
+ 1 .. NeuQuant neural-net quantization algorithm by Anthony Dekker
+
 =head2 tone_mapping
 
 Converts a High Dynamic Range image (48-bit RGB or 96-bit RGBF) to a 24-bit RGB image, suitable for display.
 
  $pimage->tone_mapping($tone_mapping_operator, $param1, $param2);
+
+Returns C<$pimage> (self).
 
 C<$tone_mapping_operator> - tone mapping operator identifier:
 
