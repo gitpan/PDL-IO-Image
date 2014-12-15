@@ -1,7 +1,7 @@
 use strict;
 use strict;
 use warnings;
-our $VERSION = '0.003';
+our $VERSION = '0.004';
 
 pp_setversion($VERSION);
 
@@ -179,38 +179,79 @@ BOOT:
 INCLUDE: const-xs.inc
 
 PDL::IO::Image
-new_from_file(char * class, char * filename, SV *f=NULL, int flags=0, int page=0)
+new_from_file(char * class, SV * input_sv, SV *f=NULL, int flags=0, int page=0)
     CODE:
     {
         FIBITMAP *dib = NULL;
         FREE_IMAGE_FORMAT fif = _sv2fif(f);
-        if (fif == FIF_UNKNOWN) fif = FreeImage_GetFileType(filename, 0);
-        if (fif == FIF_UNKNOWN) fif = FreeImage_GetFIFFromFilename(filename);
-        if (fif == FIF_UNKNOWN) croak("FAIL: unknown format '%s'", filename);
 
-        if (page > 0) {
-          FIMULTIBITMAP * multi = FreeImage_OpenMultiBitmap(fif, filename, FALSE, TRUE, FALSE, flags);
-          if (multi) {
-            int count = FreeImage_GetPageCount(multi);
-            if (page < count) {
-              FIBITMAP *page_dib = FreeImage_LockPage(multi, page);
-              dib = FreeImage_Clone(page_dib);
-              FreeImage_UnlockPage(multi, page_dib, FALSE);
+        if(SvROK(input_sv) && SvTYPE(SvRV(input_sv)) < SVt_PVAV) {
+          /* input_sv is a reference to scalar */
+          SV *input = SvRV(input_sv);
+          STRLEN input_len = 0;
+          BYTE *input_ptr = (BYTE *)SvPVbyte(input, input_len);
+          FIMEMORY *hmem = FreeImage_OpenMemory(input_ptr, input_len);
+
+          if (!hmem) croak("FAIL: FreeImage_OpenMemory failed");
+          if (fif == FIF_UNKNOWN) fif = FreeImage_GetFileTypeFromMemory(hmem, 0);
+          if (fif == FIF_UNKNOWN) croak("FAIL: unknown format");
+
+          if (page > 0) {
+            FIMULTIBITMAP * multi = FreeImage_LoadMultiBitmapFromMemory(fif, hmem, flags);
+            if (multi) {
+              int count = FreeImage_GetPageCount(multi);
+              if (page < count) {
+                FIBITMAP *page_dib = FreeImage_LockPage(multi, page);
+                dib = FreeImage_Clone(page_dib);
+                FreeImage_UnlockPage(multi, page_dib, FALSE);
+              }
+              else {
+                warn("invalid page index '%d' (max=%d)", page, count-1);
+              }
+              FreeImage_CloseMultiBitmap(multi, 0);
             }
             else {
-              warn("invalid page index '%d' (max=%d)", page, count-1);
+              warn("FreeImage_OpenMultiBitmap failed");
             }
-            FreeImage_CloseMultiBitmap(multi, 0);
           }
           else {
-            warn("cannot open '%s' as multi page image", filename);
+            dib = FreeImage_LoadFromMemory(fif, hmem, flags);
           }
+          if (dib == NULL) croak("FAIL: cannot load image");
         }
         else {
-          dib = FreeImage_Load(fif, filename, flags);
+          /* input_sv is a file name */
+          STRLEN flen = 0;
+          char * filename = SvPV(input_sv, flen);
+          if (!filename || flen<=0) croak("FAIL: invalid filename");
+          if (fif == FIF_UNKNOWN) fif = FreeImage_GetFileType(filename, 0);
+          if (fif == FIF_UNKNOWN) fif = FreeImage_GetFIFFromFilename(filename);
+          if (fif == FIF_UNKNOWN) croak("FAIL: unknown format '%s'", filename);
+
+          if (page > 0) {
+            FIMULTIBITMAP * multi = FreeImage_OpenMultiBitmap(fif, filename, FALSE, TRUE, FALSE, flags);
+            if (multi) {
+              int count = FreeImage_GetPageCount(multi);
+              if (page < count) {
+                FIBITMAP *page_dib = FreeImage_LockPage(multi, page);
+                dib = FreeImage_Clone(page_dib);
+                FreeImage_UnlockPage(multi, page_dib, FALSE);
+              }
+              else {
+                warn("invalid page index '%d' (max=%d)", page, count-1);
+              }
+              FreeImage_CloseMultiBitmap(multi, 0);
+            }
+            else {
+              warn("cannot open '%s' as multi page image", filename);
+            }
+          }
+          else {
+            dib = FreeImage_Load(fif, filename, flags);
+          }
+          if (dib == NULL) croak("FAIL: cannot load '%s'", filename);
         }
 
-        if (dib == NULL) croak("FAIL: cannot load '%s'", filename);
         Newz(0, RETVAL, 1, struct img_struct);
         if (RETVAL == NULL) croak("FAIL: Newz failed");
 
@@ -445,6 +486,106 @@ new_from_pdl(char * class, pdl * pixels, pdl * palette=NULL)
     }
     OUTPUT:
         RETVAL
+
+PDL::IO::Image
+clone(PDL::IO::Image self)
+    CODE:
+    {
+      Newz(0, RETVAL, 1, struct img_struct);
+      if (RETVAL == NULL) croak("FAIL: Newz failed");
+      FIBITMAP *newdib = FreeImage_Clone(self->dib);
+      if (newdib == NULL) croak("FAIL: FreeImage_Clone failed");
+      RETVAL->dib = newdib;
+    }
+    OUTPUT:
+        RETVAL
+
+void
+dump_bitmap(PDL::IO::Image self, int target_bpp=0)
+    PPCODE:
+    {
+      SV *bmp_sv, *pal_sv;
+      unsigned char *bmp = NULL, *pal = NULL;
+      unsigned w, h, bpp, cu, it, sz, szp, szl, y, i;
+      FIBITMAP *newdib = NULL, *b = NULL;
+
+      /* FIRST: we need FIT_BITMAP */
+      it  = FreeImage_GetImageType(self->dib);
+      if (it==FIT_RGB16 || it==FIT_RGBA16 || it==FIT_RGBF || it==FIT_RGBAF) {
+        newdib = FreeImage_ToneMapping(self->dib, FITMO_REINHARD05, 0, 0);
+      }
+      else {
+        newdib = FreeImage_ConvertToType(self->dib, FIT_BITMAP, 1);
+      }
+      if (!newdib) {
+        warn("dump_bitmap failed to convert image into a BITMAP");
+        XSRETURN_UNDEF;
+      }
+
+      /* SECOND: we only want 8/24/32-bpp output */
+      bpp = FreeImage_GetBPP(newdib);
+      if (target_bpp!=8 && target_bpp!=24 && target_bpp!=32) target_bpp = 0;
+      if (target_bpp==0 && (bpp==1 || bpp==4 || bpp==8))     target_bpp = 8;
+      if (target_bpp==0 && (bpp==16 || bpp==24))             target_bpp = 24;
+      if (target_bpp==0 && bpp>=32)                          target_bpp = 32;
+
+      if (target_bpp==8 && bpp!=8) {
+        /* XXX BEWARE: high-color bitmap (16, 24 or 32-bit) is converted into a greyscale bitmap */
+        b = FreeImage_ConvertTo8Bits(newdib);
+      }
+      else if (target_bpp==24 && bpp!=24) {
+        b = FreeImage_ConvertTo24Bits(newdib);
+      }
+      else if (target_bpp==32 && bpp!=32) {
+        b = FreeImage_ConvertTo32Bits(newdib);
+      }
+      if (b) {
+        FreeImage_Unload(newdib);
+        newdib = b;
+      }
+
+      bpp = FreeImage_GetBPP(newdib);
+      w   = FreeImage_GetWidth(newdib);
+      h   = FreeImage_GetHeight(newdib);
+      cu  = FreeImage_GetColorsUsed(newdib);
+      szp = (bpp/8);    /* pixel size */
+      szl = szp * w;    /* line size */
+      sz  = szl * h;    /* picture size */
+
+      if (bpp==32 || bpp==24 || bpp==8) {
+        bmp_sv = NEWSV(0, sz);
+        SvPOK_only(bmp_sv);
+        SvCUR_set(bmp_sv, sz);
+        bmp = (unsigned char *)SvPV_nolen(bmp_sv);
+        for(i = 0, y = 0; y < h; y++) {
+          BYTE *bits = FreeImage_GetScanLine(newdib, h-y-1);
+          Copy(bits, bmp + i, szl, BYTE);
+          i += szl;
+        }
+        XPUSHs(sv_2mortal(newSViv(w)));
+        XPUSHs(sv_2mortal(newSViv(h)));
+        XPUSHs(sv_2mortal(newSViv(bpp)));
+        XPUSHs(sv_2mortal(bmp_sv));
+        if (cu>0) {
+          RGBQUAD *p = FreeImage_GetPalette(newdib);
+          pal_sv = NEWSV(0, cu*3);
+          SvPOK_only(pal_sv);
+          SvCUR_set(pal_sv, cu*3);
+          pal = (unsigned char *)SvPV_nolen(pal_sv);
+          for (i = 0; i < cu; i++) {
+            pal[i*3]     = (unsigned char) p[i].rgbRed;
+            pal[i*3 + 1] = (unsigned char) p[i].rgbGreen;
+            pal[i*3 + 2] = (unsigned char) p[i].rgbBlue;
+          }
+          XPUSHs(sv_2mortal(pal_sv));
+        }
+      }
+      else {
+        warn("dump_bitmap: unexpected bpp");
+      }
+
+      FreeImage_Unload(newdib);
+    }
 
 const char*
 free_image_version(SV *class)
@@ -683,10 +824,83 @@ tone_mapping(PDL::IO::Image self, int tmo, double p1=0, double p2=0)
         XPUSHs(ST(0)); /* return self */
 
 void
-rotate(PDL::IO::Image self, double angle)
+rotate(PDL::IO::Image self, double angle, ...)
     PPCODE:
     {
-        FIBITMAP *newdib = FreeImage_Rotate(self->dib, angle, NULL); /* XXX maybe handle bgcolor */
+        FIBITMAP *newdib = NULL;
+        unsigned bpp = FreeImage_GetBPP(self->dib);
+        FREE_IMAGE_TYPE fit = FreeImage_GetImageType(self->dib);
+
+        if (items > 2) {
+          switch(fit) {
+            case FIT_BITMAP:
+              switch(bpp) {
+                case 8:
+                  {
+                    BYTE color = (BYTE)SvUV(ST(2));
+                    newdib = FreeImage_Rotate(self->dib, angle, &color);
+                  }
+                  break;
+                case 24:
+                case 32:
+                  {
+                    RGBQUAD color = { 0, 0, 0, 0 };
+                    if (items >= 3) color.rgbRed      = (BYTE)SvUV(ST(2));
+                    if (items >= 4) color.rgbGreen    = (BYTE)SvUV(ST(3));
+                    if (items >= 5) color.rgbBlue     = (BYTE)SvUV(ST(4));
+                    if (items >= 6) color.rgbReserved = (BYTE)SvUV(ST(5));
+                    newdib = FreeImage_Rotate(self->dib, angle, &color);
+                  }
+                  break;
+                default:
+                  /* warn("FAIL: do not know how to handle bpp '%d'", bpp); */
+                  break;
+              }
+              break;
+            case FIT_UINT16:
+              {
+                WORD color = (WORD)SvUV(ST(2));;
+                newdib = FreeImage_Rotate(self->dib, angle, &color);
+              }
+              break;
+            case FIT_RGB16:
+            case FIT_RGBA16:
+              {
+                FIRGBA16 color = { 0, 0, 0, 0 };
+                if (items >= 3) color.red   = (WORD)SvUV(ST(2));
+                if (items >= 4) color.green = (WORD)SvUV(ST(3));
+                if (items >= 5) color.blue  = (WORD)SvUV(ST(4));
+                if (items >= 6) color.alpha = (WORD)SvUV(ST(5));
+                newdib = FreeImage_Rotate(self->dib, angle, &color);
+              }
+              break;
+            case FIT_FLOAT:
+              {
+                float color = (float)SvNV(ST(2));
+                newdib = FreeImage_Rotate(self->dib, angle, &color);
+              }
+              break;
+            case FIT_RGBF:
+            case FIT_RGBAF:
+              {
+                FIRGBAF color = { 0, 0, 0, 0 };
+                if (items >= 3) color.red   = (float)SvNV(ST(2));
+                if (items >= 4) color.green = (float)SvNV(ST(3));
+                if (items >= 5) color.blue  = (float)SvNV(ST(4));
+                if (items >= 6) color.alpha = (float)SvNV(ST(5));
+                newdib = FreeImage_Rotate(self->dib, angle, &color);
+              }
+              break;
+            default:
+              /* warn("FAIL: do not know how to handle image type '%d'", fit); */
+              break;
+          }
+        }
+
+        if (!newdib) {
+          newdib = FreeImage_Rotate(self->dib, angle, NULL);
+        }
+
         if (newdib) {
           if (self->dib) FreeImage_Unload(self->dib);
           self->dib = newdib;
@@ -738,6 +952,111 @@ color_quantize(PDL::IO::Image self, int quantize=FIQ_WUQUANT)
         }
         else {
           warn("FreeImage_ColorQuantize failed");
+        }
+        XPUSHs(ST(0)); /* return self */
+    }
+
+void
+color_to_4bpp(PDL::IO::Image self)
+    PPCODE:
+    {
+        FIBITMAP *newdib = FreeImage_ConvertTo4Bits(self->dib);
+        if (newdib) {
+          if (self->dib) FreeImage_Unload(self->dib);
+          self->dib = newdib;
+        }
+        else {
+          warn("FreeImage_ConvertTo4Bits failed");
+        }
+        XPUSHs(ST(0)); /* return self */
+    }
+
+void
+color_to_8bpp(PDL::IO::Image self)
+    PPCODE:
+    {
+        FIBITMAP *newdib = FreeImage_ConvertTo8Bits(self->dib);
+        if (newdib) {
+          if (self->dib) FreeImage_Unload(self->dib);
+          self->dib = newdib;
+        }
+        else {
+          warn("FreeImage_ConvertTo8Bits failed");
+        }
+        XPUSHs(ST(0)); /* return self */
+    }
+
+void
+color_to_8bpp_grey(PDL::IO::Image self)
+    PPCODE:
+    {
+        FIBITMAP *newdib = FreeImage_ConvertToGreyscale(self->dib);
+        if (newdib) {
+          if (self->dib) FreeImage_Unload(self->dib);
+          self->dib = newdib;
+        }
+        else {
+          warn("FreeImage_ConvertToGreyscale failed");
+        }
+        XPUSHs(ST(0)); /* return self */
+    }
+
+void
+color_to_16bpp_555(PDL::IO::Image self)
+    PPCODE:
+    {
+        FIBITMAP *newdib = FreeImage_ConvertTo16Bits555(self->dib);
+        if (newdib) {
+          if (self->dib) FreeImage_Unload(self->dib);
+          self->dib = newdib;
+        }
+        else {
+          warn("FreeImage_ConvertTo16Bits555 failed");
+        }
+        XPUSHs(ST(0)); /* return self */
+    }
+
+void
+color_to_16bpp_565(PDL::IO::Image self)
+    PPCODE:
+    {
+        FIBITMAP *newdib = FreeImage_ConvertTo16Bits565(self->dib);
+        if (newdib) {
+          if (self->dib) FreeImage_Unload(self->dib);
+          self->dib = newdib;
+        }
+        else {
+          warn("FreeImage_ConvertTo16Bits565 failed");
+        }
+        XPUSHs(ST(0)); /* return self */
+    }
+
+void
+color_to_24bpp(PDL::IO::Image self)
+    PPCODE:
+    {
+        FIBITMAP *newdib = FreeImage_ConvertTo24Bits(self->dib);
+        if (newdib) {
+          if (self->dib) FreeImage_Unload(self->dib);
+          self->dib = newdib;
+        }
+        else {
+          warn("FreeImage_ConvertTo24Bits failed");
+        }
+        XPUSHs(ST(0)); /* return self */
+    }
+
+void
+color_to_32bpp(PDL::IO::Image self)
+    PPCODE:
+    {
+        FIBITMAP *newdib = FreeImage_ConvertTo32Bits(self->dib);
+        if (newdib) {
+          if (self->dib) FreeImage_Unload(self->dib);
+          self->dib = newdib;
+        }
+        else {
+          warn("FreeImage_ConvertTo32Bits failed");
         }
         XPUSHs(ST(0)); /* return self */
     }
@@ -796,15 +1115,43 @@ rescale_pct(PDL::IO::Image self, double dst_width_pct=0, double dst_height_pct=0
     }
 
 void
-save(PDL::IO::Image self, const char *filename, SV * f=NULL, int flags=0);
+save(PDL::IO::Image self, SV * destination, SV * f=NULL, int flags=0);
     PPCODE:
     {
         if (self->dib) {
+          FIMEMORY *hmem = NULL;
+          BYTE *mem_buffer = NULL;
+          DWORD size_in_bytes = 0;
           FREE_IMAGE_FORMAT fif = _sv2fif(f);
-          if (fif == FIF_UNKNOWN) fif = FreeImage_GetFIFFromFilename(filename);
-          if (fif == FIF_UNKNOWN) croak("FAIL: unspecified format");
-          if (!FreeImage_Save(fif, self->dib, filename, flags)) {
-            warn("FreeImage_Save failed (perhaps wrong format)");
+          FREE_IMAGE_TYPE fit = FreeImage_GetImageType(self->dib);
+
+          if(SvROK(destination) && SvTYPE(SvRV(destination)) < SVt_PVAV) {
+            /* destination is a reference to scalar */
+            SV *output = SvRV(destination);
+            BYTE *output_ptr = NULL;
+            if (fif == FIF_UNKNOWN) croak("FAIL: unspecified format");
+            hmem = FreeImage_OpenMemory(NULL, 0);
+            if (!FreeImage_SaveToMemory(fif, self->dib, hmem, flags)) {
+              warn("FreeImage_SaveToMemory failed (format '%d', image type '%d')", fif, fit);
+            }
+            FreeImage_AcquireMemory(hmem, &mem_buffer, &size_in_bytes);
+            sv_setpvn(output, "", 0);
+            output_ptr = SvGROW(output, size_in_bytes);
+            SvCUR_set(output, size_in_bytes);
+            SvPOK_only(output);
+            Copy(mem_buffer, output_ptr, size_in_bytes, BYTE);
+            FreeImage_CloseMemory(hmem);
+          }
+          else {
+            /* destination is a filename */
+            STRLEN flen = 0;
+            char * filename = SvPV(destination, flen);
+            if (!filename || flen<=0) croak("FAIL: invalid filename");
+            if (fif == FIF_UNKNOWN) fif = FreeImage_GetFIFFromFilename(filename);
+            if (fif == FIF_UNKNOWN) croak("FAIL: unspecified format");
+            if (!FreeImage_Save(fif, self->dib, filename, flags)) {
+              warn("FreeImage_Save failed (format '%d', image type '%d')", fif, fit);
+            }
           }
         }
         XPUSHs(ST(0)); /* return self */
@@ -1736,7 +2083,10 @@ Create PDL::IO::Image object from image file.
  #or
  my $pimage = IO::PDL::Image->new_from_file($filename, $format, $format_flag, $page);
 
-C<$filename> - input image file name.
+ #if you have image file content in a scalar variable you can use
+ my $pimage = IO::PDL::Image->new_from_file(\$variable_with_image_data);
+
+C<$filename> - input image file name or a reference to scalar variable with imiga data.
 
 C<$format> - string identifying file format (e.g. C<'JPEG'> - for valid values see L</"Supported file formats">),
 default is C<'AUTO'> which means that format is auto detected (based on file header with fall-back to detection based
@@ -1782,6 +2132,12 @@ C<$pixels_pdl> - PDL piddle containing pixel data, dimensions and type must comp
 
 C<$palette_pdl> - Optional PDL piddle with color palette (has to be C<PDL Byte[3,N]> where 0 < N <= 256) containing RGB triplets.
 
+=head2 clone
+
+Create a copy (clone) of PDL::IO::Image object.
+
+ my $pimage_copy = $pimage->clone();
+
 =head2 pixels_to_pdl
 
 Export pixel data from PDL::IO::Image object into a piddle.
@@ -1812,9 +2168,14 @@ Export PDL::IO::Image object into a image file.
  #or
  $pimage->save($filename);
 
+ #you can save the image data to a variable like this
+ my $output_image;
+ $pimage->save(\$output_image, $format);
+ #NOTE: $format is mandatory in this case
+
 Returns C<$pimage> (self).
 
-C<$filename> - output image file name.
+C<$filename> - output image file name or a reference to perl scalar variable.
 
 C<$format> - string identifying file format (e.g. C<'JPEG'> - for valid values see L</"Supported file formats">),
 default is C<'AUTO'> which means that format is auto detected from extension of C<$filename>.
@@ -1866,6 +2227,19 @@ created by OR-ing some of available constants:
  PDL::IO::Image::TIFF_JPEG                 Save using JPEG compression (8-bit greyscale and 24-bit only)
  PDL::IO::Image::TIFF_LOGLUV               Save using LogLuv compression (only available with RGBF images
  PDL::IO::Image::TARGA_SAVE_RLE            Save with RLE compression
+
+=head2 dump_bitmap
+
+Extract raw bitmap data (+ do necessary image type and/or bpp conversions).
+
+ my ($width, $height, $bpp, $pixels, $palette) = $pimage->dump_bitmap;
+ #or
+ my ($width, $height, $bpp, $pixels, $palette) = $pimage->dump_bitmap($required_bpp);
+
+C<$pixels> and C<$palette> are raw data buffers containg sequence of RGB (RGBA) byte values.
+
+C<$required_bpp> can be 8, 24 or 32 - before dumping the image is converted to C<BITMAP> image type + colors depth is
+converted to given value. Default is autodetect the lowest sufficient bpp (from 8, 24, 32).
 
 =head2 get_image_type
 
@@ -1987,6 +2361,12 @@ Returns C<$pimage> (self).
 Rotates image, the angle of counter clockwise rotation is specified by the C<$angle> parameter in degrees.
 
  $pimage->rotate($angle);
+ #or
+ $pimage->rotate($angle, $bg_r, $bg_g, $bg_b, $bg_a);   # RGBA(F|16) images
+ $pimage->rotate($angle, $bg_r, $bg_g, $bg_b);          # RGB(F|16) images
+ $pimage->rotate($angle, $bg);                          # palette-based images
+
+You can specify optional backgroung color via C<$bg_r>, C<$bg_g>, C<$bg_b>, C<$bg_a> or C<$bg>.
 
 Returns C<$pimage> (self).
 
@@ -2053,6 +2433,70 @@ C<$gamma> - real value greater than 0, value of 1.0 leaves the image alone, less
 darkens it, and greater than one lightens it
 
 C<$invert> - C<0> or C<1> invert (or not) all pixels
+
+=head2 color_to_4bpp
+
+Converts a bitmap to 4 bits. If the bitmap was a high-color bitmap (16, 24 or 32-bit) or if it was
+a monochrome or greyscale bitmap (1 or 8-bit), the end result will be a greyscale bitmap,
+otherwise (1-bit palletised bitmaps) it will be a palletised bitmap.
+
+ $pimage->color_to_4bpp();
+
+Returns C<$pimage> (self).
+
+=head2 color_to_8bpp
+
+Converts a bitmap to 8 bits. If the bitmap was a high-color bitmap (16, 24 or 32-bit) or if it was
+a monochrome or greyscale bitmap (1 or 4-bit), the end result will be a greyscale bitmap,
+otherwise (1 or 4-bit palletised bitmaps) it will be a palletised bitmap.
+
+ $pimage->color_to_8bpp();
+
+Returns C<$pimage> (self).
+
+=head2 color_to_8bpp_grey
+
+Converts a bitmap to a 8-bit greyscale image with a linear ramp. Contrary to the
+FreeImage_ConvertTo8Bits function, 1-, 4- and 8-bit palletised images are correctly
+converted, as well as images with a FIC_MINISWHITE color type.
+
+ $pimage->color_to_8bpp_grey();
+
+Returns C<$pimage> (self).
+
+=head2 color_to_16bpp_555
+
+Converts a bitmap to 16 bits, where each pixel has a color pattern of 5 bits red, 5 bits green
+and 5 bits blue. One bit in each pixel is unused.
+
+ $pimage->color_to_16bpp_555();
+
+Returns C<$pimage> (self).
+
+=head2 color_to_16bpp_565
+
+Converts a bitmap to 16 bits, where each pixel has a color pattern of 5 bits red, 6 bits green
+and 5 bits blue.
+
+ $pimage->color_to_16bpp_565();
+
+Returns C<$pimage> (self).
+
+=head2 color_to_24bpp
+
+Converts a bitmap to 24 bits per pixel.
+
+ $pimage->color_to_24bpp();
+
+Returns C<$pimage> (self).
+
+=head2 color_to_32bpp
+
+Converts a bitmap to 32 bits per pixel.
+
+ $pimage->color_to_32bpp();
+
+Returns C<$pimage> (self).
 
 =head2 color_dither
 

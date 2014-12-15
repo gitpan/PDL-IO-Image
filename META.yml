@@ -27,4 +27,4 @@ requires:
   PDL: 2.006
 resources:
   repository: https://github.com/kmx/pdl-io-image
-version: 0.003
+version: 0.004
